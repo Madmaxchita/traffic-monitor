@@ -1,0 +1,21 @@
+# Реальные конфиги (только примеры коммитим)
+agent/config.yaml
+bot/config.yaml
+
+# Состояние и логи
+*.log
+state.json
+bot-state.json
+
+# Питоновские артефакты
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Редакторы
+.vscode/
+.idea/
+*.swp
+.DS_Store

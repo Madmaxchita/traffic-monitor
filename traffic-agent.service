@@ -1,0 +1,16 @@
+[Unit]
+Description=Traffic monitor agent
+After=network-online.target vnstat.service
+Wants=network-online.target vnstat.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/traffic-agent
+Restart=on-failure
+RestartSec=30
+# Лог-файл создаётся самим скриптом, journald нам только для падений
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

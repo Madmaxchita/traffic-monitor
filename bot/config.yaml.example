@@ -1,0 +1,29 @@
+# ============================================================
+# Конфиг центрального бота
+# ============================================================
+
+# Токен Telegram-бота (получить у @BotFather)
+telegram_token: "REPLACE_WITH_BOT_TOKEN"
+
+# URL кастомного self-host Bot API (без завершающего слэша)
+# Например: "https://tg-api.example.com" или "http://127.0.0.1:8081"
+telegram_api_base: "REPLACE_WITH_SELFHOST_API_URL"
+
+# ID чатов, куда слать уведомления (можно несколько)
+# Узнать свой chat_id: написать боту, потом
+# curl "${telegram_api_base}/bot${token}/getUpdates"
+chat_ids:
+  - 123456789
+
+# HTTP-сервер для приёма отчётов от агентов
+listen_host: "0.0.0.0"
+listen_port: 8080
+
+# Тот же секрет, что в agent/config.yaml на всех серверах
+shared_secret: "REPLACE_WITH_LONG_RANDOM_STRING"
+
+# Время суток для ежедневного отчёта (по локальному времени сервера)
+daily_report_hour: 10    # 10:00
+
+# Если агент молчит дольше N секунд — отправить уведомление
+agent_silence_alert: 7200    # 2 часа
