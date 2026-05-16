@@ -24,26 +24,58 @@ from pathlib import Path
 
 # ---------- авто-установка rich ----------
 def ensure_rich():
+    # Сначала пробуем импортировать — если получилось, ничего больше не делаем.
+    # НЕ проверяем __version__: на некоторых версиях rich его нет.
     try:
         import rich  # noqa: F401
+        # Дополнительно убеждаемся, что rich.console работает
+        from rich.console import Console  # noqa: F401
         return
     except ImportError:
         pass
-    print("📦 Устанавливаю библиотеку rich для красивого интерфейса...")
-    cmds = [
-        ["apt", "install", "-y", "-qq", "python3-rich"],
-        ["pip3", "install", "--break-system-packages", "rich"],
-        ["pip3", "install", "rich"],
-    ]
+
+    print("📦 rich не установлен, ставлю...")
+
+    # Проверка, не держит ли dpkg-lock другой процесс (unattended-upgrade и т.п.).
+    # Если держит — apt будет молча ждать, что выглядит как зависание.
+    import time as _time
+    for attempt in range(30):  # до 30 секунд ожидания
+        if not _dpkg_locked():
+            break
+        if attempt == 0:
+            print("⏳ dpkg занят другим процессом (unattended-upgrade?), жду...")
+        _time.sleep(1)
+    else:
+        print("⚠ dpkg всё ещё занят. Попробую через pip вместо apt.")
+
+    cmds = []
+    if not _dpkg_locked():
+        cmds.append(["apt", "install", "-y", "-qq", "python3-rich"])
+    cmds.append(["pip3", "install", "--break-system-packages", "rich"])
+    cmds.append(["pip3", "install", "rich"])
+
     for cmd in cmds:
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(cmd, check=True, capture_output=True, timeout=180)
             print("✓ rich установлен")
             return
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             continue
-    print("✗ Не удалось установить rich. Поставьте вручную: pip3 install rich")
+
+    print("✗ Не удалось установить rich. Поставьте вручную: apt install python3-rich")
     sys.exit(1)
+
+
+def _dpkg_locked() -> bool:
+    """True, если dpkg-lock-frontend или apt-lists заняты другим процессом."""
+    for lockfile in ("/var/lib/dpkg/lock-frontend", "/var/lib/apt/lists/lock"):
+        try:
+            r = subprocess.run(["fuser", lockfile], capture_output=True, timeout=3)
+            if r.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return False
     sys.exit(1)
 
 
