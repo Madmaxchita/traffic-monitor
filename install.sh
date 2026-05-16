@@ -92,4 +92,8 @@ if [[ ! -t 0 ]]; then
     fi
 fi
 
-exec python3 "$TARGET" "$@"
+echo "🚀 Запускаю Python-установщик..."
+echo "   При первом запуске может потребоваться установка библиотеки rich (1-2 мин)"
+echo
+
+exec python3 -u "$TARGET" "$@"

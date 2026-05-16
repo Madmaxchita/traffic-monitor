@@ -29,20 +29,29 @@ def ensure_rich():
         return
     except ImportError:
         pass
-    print("📦 Устанавливаю библиотеку rich для красивого интерфейса...")
+    # Сразу включаем небуферизованный вывод, чтобы пользователь видел прогресс
+    print("📦 Устанавливаю библиотеку rich для красивого интерфейса...", flush=True)
+    print("   Это может занять 30-120 секунд (особенно при первой установке).", flush=True)
+
     cmds = [
-        ["apt", "install", "-y", "-qq", "python3-rich"],
-        ["pip3", "install", "--break-system-packages", "rich"],
-        ["pip3", "install", "rich"],
+        ("apt install python3-rich", ["apt", "install", "-y", "python3-rich"]),
+        ("pip install rich (--break-system-packages)",
+         ["pip3", "install", "--break-system-packages", "rich"]),
+        ("pip install rich", ["pip3", "install", "rich"]),
     ]
-    for cmd in cmds:
+    for name, cmd in cmds:
+        print(f"   ⏳ Пробую: {name}...", flush=True)
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            print("✓ rich установлен")
+            # НЕ capture_output — показываем процесс в реальном времени
+            import subprocess as _sp
+            _sp.run(cmd, check=True,
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            print("✓ rich установлен", flush=True)
             return
         except (subprocess.CalledProcessError, FileNotFoundError):
+            print(f"   ⚠ Не сработало, пробую следующий способ", flush=True)
             continue
-    print("✗ Не удалось установить rich. Поставьте вручную: pip3 install rich")
+    print("✗ Не удалось установить rich. Поставьте вручную: pip3 install rich", flush=True)
     sys.exit(1)
 
 
