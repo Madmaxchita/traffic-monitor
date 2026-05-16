@@ -2,6 +2,17 @@
 # Bootstrap для install.py
 set -e
 
+# КРИТИЧНО: если запустились через curl|bash, наш stdin — это пайп от curl.
+# Вложенные curl/apt могут случайно туда залезть и зависнуть.
+# Поэтому сразу же закрываем pipe-stdin и подключаем терминал (или /dev/null).
+if [[ ! -t 0 ]]; then
+    if [[ -r /dev/tty ]]; then
+        exec </dev/tty
+    else
+        exec </dev/null
+    fi
+fi
+
 if [[ "$EUID" -ne 0 ]]; then
     echo "Запускайте от root: curl ... | sudo bash"
     exit 1
@@ -31,16 +42,5 @@ if ! head -1 "$TARGET" | grep -q "^#!"; then
     exit 1
 fi
 chmod +x "$TARGET"
-
-# Если stdin не интерактивный (мы под curl|bash) — перенаправим его на терминал
-if [[ ! -t 0 ]]; then
-    if [[ -r /dev/tty ]]; then
-        exec </dev/tty
-    else
-        echo "⚠️  stdin не интерактивный. Запустите вручную:"
-        echo "   sudo python3 $TARGET"
-        exit 1
-    fi
-fi
 
 exec python3 "$TARGET" "$@"
