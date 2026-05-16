@@ -446,21 +446,33 @@ def collect_agent_params() -> dict:
             return collect_agent_params()
 
     console.print("\n💾 [prompt]Лимит трафика[/prompt]")
+    console.print("[muted]Большинство хостингов указывают лимит в GB (10⁹ байт).[/muted]")
     table = Table(box=box.SIMPLE, show_header=False)
     table.add_column("Опция", style="accent")
     table.add_column("Описание")
-    table.add_column("Байт", style="muted")
-    table.add_row("1", "30 TiB — хостинг считает в TiB (2⁴⁰)", "32 985 348 833 280")
-    table.add_row("2", "30 TB  — хостинг считает в TB  (10¹²)", "30 000 000 000 000")
-    table.add_row("3", "Своё значение", "—")
+    table.add_row("1", "Ввести в GB  (гигабайтах, 10⁹ — как у хостинга) [рекомендуется]")
+    table.add_row("2", "Ввести в TB  (терабайтах, 10¹²)")
+    table.add_row("3", "Ввести в TiB (тебибайтах, 2⁴⁰ — как считает vnstat)")
+    table.add_row("4", "Ввести в байтах напрямую")
     console.print(table)
-    limit_choice = Prompt.ask("Выбор", choices=["1", "2", "3"], default="1")
+    limit_choice = Prompt.ask("Выбор", choices=["1", "2", "3", "4"], default="1")
+    limit_human = ""
     if limit_choice == "1":
-        limit_bytes = 32985348833280
+        v = IntPrompt.ask("   Лимит в [accent]GB[/accent]", default=1000)
+        limit_bytes = v * 1_000_000_000
+        limit_human = f"{v} GB"
     elif limit_choice == "2":
-        limit_bytes = 30000000000000
+        v = IntPrompt.ask("   Лимит в [accent]TB[/accent]", default=30)
+        limit_bytes = v * 1_000_000_000_000
+        limit_human = f"{v} TB"
+    elif limit_choice == "3":
+        v = IntPrompt.ask("   Лимит в [accent]TiB[/accent]", default=30)
+        limit_bytes = v * 1024**4
+        limit_human = f"{v} TiB"
     else:
-        limit_bytes = IntPrompt.ask("Лимит в байтах", default=32985348833280)
+        limit_bytes = IntPrompt.ask("   Лимит в байтах", default=30_000_000_000)
+        limit_human = f"{limit_bytes:,} байт"
+    ok(f"Лимит: [accent]{limit_human}[/accent] = {limit_bytes:,} байт")
 
     reset_day = IntPrompt.ask("📅 [prompt]День сброса счётчика[/prompt] (1-28)", default=1)
 
@@ -532,7 +544,7 @@ def collect_agent_params() -> dict:
     summary.add_column("", style="accent")
     summary.add_row("🏷  Server ID",   server_id)
     summary.add_row("🌐 Интерфейс",    iface)
-    summary.add_row("💾 Лимит",        f"{limit_bytes:,} байт ({limit_bytes / 1024**4:.1f} TiB)")
+    summary.add_row("💾 Лимит",        f"{limit_human} ({limit_bytes:,} байт)")
     summary.add_row("📅 День сброса",  str(reset_day))
     summary.add_row("🔗 Bot URL",      bot_url)
     summary.add_row("🛑 Auto-block",   "✅ да" if auto_block else "❌ нет")
@@ -545,6 +557,7 @@ def collect_agent_params() -> dict:
 
     return dict(
         server_id=server_id, interface=iface, limit_bytes=limit_bytes,
+        limit_human=limit_human,
         reset_day=reset_day, bot_url=bot_url, shared_secret=secret,
         auto_block=auto_block,
     )
@@ -674,9 +687,12 @@ def collect_bot_params() -> dict:
 
 def write_agent_config(p: dict) -> None:
     cfg = CONFIG_DIR / "agent.yaml"
+    limit_human = p.get('limit_human', f"{p['limit_bytes']:,} байт")
     cfg.write_text(f"""# Сгенерировано install.py {datetime.now().isoformat()}
 server_id: "{p['server_id']}"
 interface: "{p['interface']}"
+
+# Лимит трафика: {limit_human}
 limit_bytes: {p['limit_bytes']}
 reset_day: {p['reset_day']}
 
