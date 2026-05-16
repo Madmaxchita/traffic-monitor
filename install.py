@@ -50,7 +50,7 @@ ensure_rich()
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm, IntPrompt
+from rich.prompt import Prompt, Confirm as _RichConfirm, IntPrompt
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from rich.live import Live
@@ -121,6 +121,32 @@ def die(msg: str) -> None:
 def require_root():
     if os.geteuid() != 0:
         die("Запускайте от root: sudo python3 install.py")
+
+
+class Confirm:
+    """
+    Обёртка над rich.Confirm с поддержкой русского ввода (д/н, да/нет)
+    и устойчивостью к произвольному мусору в ответе.
+    """
+    @staticmethod
+    def ask(prompt: str, default: bool = False) -> bool:
+        yes_tokens = {"y", "yes", "д", "да", "1", "true", "т"}
+        no_tokens  = {"n", "no",  "н", "нет", "0", "false", "f"}
+        suffix = " \\[Y/n] " if default else " \\[y/N] "
+        for _ in range(10):
+            try:
+                ans = Prompt.ask(prompt + suffix, default="", show_default=False)
+            except (EOFError, KeyboardInterrupt):
+                raise
+            ans = ans.strip().lower()
+            if ans == "":
+                return default
+            if ans in yes_tokens:
+                return True
+            if ans in no_tokens:
+                return False
+            warn(f"Не понял ответ '[muted]{ans}[/muted]'. Введите y/n, д/н или Enter для значения по умолчанию.")
+        die("Слишком много неверных ответов")
 
 
 def run(cmd: list[str], check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
@@ -229,6 +255,134 @@ def http_probe(url: str) -> int:
 
 
 # ============================================================
+#  UFW — управление файрволом
+# ============================================================
+
+def ufw_installed() -> bool:
+    return run_quiet(["which", "ufw"])
+
+
+def ufw_active() -> bool:
+    """True если UFW в режиме active."""
+    if not ufw_installed():
+        return False
+    try:
+        out = subprocess.check_output(["ufw", "status"], text=True, stderr=subprocess.DEVNULL)
+        return "Status: active" in out
+    except Exception:
+        return False
+
+
+def ufw_status_text() -> str:
+    try:
+        return subprocess.check_output(["ufw", "status", "verbose"], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return "(ufw недоступен)"
+
+
+def ufw_has_ssh_rule() -> bool:
+    """Проверяет, есть ли в UFW правило для SSH-порта.
+    Берёт текущий порт sshd из его конфига, плюс на всякий случай порт текущей SSH-сессии."""
+    try:
+        out = subprocess.check_output(["ufw", "status"], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return False
+
+    ssh_ports = set()
+    # из sshd_config
+    sshd = Path("/etc/ssh/sshd_config")
+    if sshd.exists():
+        for line in sshd.read_text().splitlines():
+            line = line.strip()
+            if line.lower().startswith("port "):
+                try:
+                    ssh_ports.add(int(line.split()[1]))
+                except Exception:
+                    pass
+    # из подкаталога sshd_config.d
+    sshd_d = Path("/etc/ssh/sshd_config.d")
+    if sshd_d.is_dir():
+        for f in sshd_d.glob("*.conf"):
+            for line in f.read_text().splitlines():
+                line = line.strip()
+                if line.lower().startswith("port "):
+                    try:
+                        ssh_ports.add(int(line.split()[1]))
+                    except Exception:
+                        pass
+    # если нигде явно не указан — значит дефолтный 22
+    if not ssh_ports:
+        ssh_ports.add(22)
+
+    # из активной SSH-сессии (запасной вариант)
+    sock = os.environ.get("SSH_CLIENT") or os.environ.get("SSH_CONNECTION")
+    if sock:
+        parts = sock.split()
+        if len(parts) >= 3 and parts[-1].isdigit():
+            ssh_ports.add(int(parts[-1]))
+
+    # ищем эти порты в выводе ufw
+    text = out.lower()
+    for port in ssh_ports:
+        if re.search(rf"\b{port}/tcp\b", text) or re.search(rf"\b{port}\b", text):
+            return True
+    # ещё могут быть алиасы 'ssh' или 'OpenSSH'
+    if re.search(r"\bopenssh\b|\bssh\b", text):
+        return True
+    return False
+
+
+def ufw_open_port(port: int, sources: list[str] | None = None,
+                  comment: str = "") -> tuple[bool, str]:
+    """
+    Открыть порт в UFW. sources=None → разрешить всем.
+    sources=["1.2.3.4", "5.6.7.8/24"] → разрешить только этим.
+    Возвращает (success, log_text).
+    """
+    log_lines = []
+    if not sources:
+        cmd = ["ufw", "allow", f"{port}/tcp"]
+        if comment:
+            cmd += ["comment", comment]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            log_lines.append(r.stdout.strip())
+            return True, "\n".join(log_lines)
+        except subprocess.CalledProcessError as e:
+            return False, e.stderr or str(e)
+    else:
+        ok_any = False
+        for src in sources:
+            cmd = ["ufw", "allow", "from", src, "to", "any",
+                   "port", str(port), "proto", "tcp"]
+            if comment:
+                cmd += ["comment", f"{comment} {src}"]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                log_lines.append(f"  ✓ {src}: {r.stdout.strip()}")
+                ok_any = True
+            except subprocess.CalledProcessError as e:
+                log_lines.append(f"  ✗ {src}: {e.stderr.strip()}")
+        return ok_any, "\n".join(log_lines)
+
+
+def validate_ip_or_cidr(s: str) -> bool:
+    """Проверяет, что строка похожа на IPv4 или IPv4/CIDR."""
+    s = s.strip()
+    m = re.match(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(/\d{1,2})?$", s)
+    if not m:
+        return False
+    octets = m.group(1).split(".")
+    if not all(0 <= int(o) <= 255 for o in octets):
+        return False
+    if m.group(2):
+        mask = int(m.group(2)[1:])
+        if not 0 <= mask <= 32:
+            return False
+    return True
+
+
+# ============================================================
 #  Сбор параметров — АГЕНТ
 # ============================================================
 
@@ -277,11 +431,48 @@ def collect_agent_params() -> dict:
 
     reset_day = IntPrompt.ask("📅 [prompt]День сброса счётчика[/prompt] (1-28)", default=1)
 
-    bot_url = Prompt.ask("🔗 [prompt]URL центрального бота[/prompt]",
-                         default="http://127.0.0.1:8080")
+    # Bot URL — собираем по частям: хост (IP/домен), порт, схема (по умолчанию http)
+    console.print()
+    console.print("🔗 [prompt]Адрес центрального бота[/prompt]")
+    bot_host = Prompt.ask("   IP или домен (без http:// и без порта)",
+                          default="127.0.0.1")
+    bot_host = bot_host.strip().rstrip("/")
+    # На случай если пользователь всё же ввёл http:// — уберём его
+    bot_host = re.sub(r"^https?://", "", bot_host)
+    # И на случай если ввёл с портом — отделим
+    if ":" in bot_host:
+        bot_host, maybe_port = bot_host.rsplit(":", 1)
+        if maybe_port.isdigit():
+            warn(f"Порт [accent]{maybe_port}[/accent] взят из адреса")
+            bot_port_default = int(maybe_port)
+        else:
+            bot_port_default = 8080
+    else:
+        bot_port_default = 8080
 
-    secret = Prompt.ask("🔑 [prompt]Shared secret[/prompt] (тот же, что в боте)",
-                        password=True)
+    bot_port = IntPrompt.ask("   Порт", default=bot_port_default)
+
+    use_https = False
+    if Confirm.ask("   Использовать [accent]HTTPS[/accent]?", default=False):
+        use_https = True
+
+    scheme = "https" if use_https else "http"
+    bot_url = f"{scheme}://{bot_host}:{bot_port}"
+    ok(f"Адрес бота: [accent]{bot_url}[/accent]")
+
+    console.print()
+    console.print(Panel(
+        "[bold]Shared secret — общий ключ между ботом и всеми агентами.[/bold]\n\n"
+        "Где взять:\n"
+        "  • Если бот уже установлен — секрет лежит в [accent]/etc/traffic_monitor/bot.yaml[/accent]\n"
+        "    на сервере с ботом, в поле [accent]shared_secret[/accent]\n"
+        "  • Посмотреть командой на сервере-боте:\n"
+        "    [accent]grep shared_secret /etc/traffic_monitor/bot.yaml[/accent]\n"
+        "  • Или его показал установщик бота при первой установке (если генерировал автоматически)\n\n"
+        "[warn]Должен совпадать буква-в-букву с тем, что в боте.[/warn]",
+        title="🔑 Где взять shared_secret", border_style="cyan",
+    ))
+    secret = Prompt.ask("🔑 [prompt]Shared secret[/prompt]", password=True)
     if not secret:
         die("Секрет не может быть пустым")
 
@@ -497,12 +688,72 @@ def install_agent_flow() -> None:
     run(["systemctl", "daemon-reload"])
     ok("Файлы установлены")
 
+    # Проверка SSH-правила перед запуском (особенно важна при auto_block)
+    check_ssh_rule_for_agent(params)
+
     step("Запускаю traffic-agent")
     run(["systemctl", "enable", "--now", "traffic-agent"], capture=True)
     time.sleep(3)
 
     console.print()
     verify_agent(params)
+
+
+def check_ssh_rule_for_agent(params: dict) -> None:
+    """Проверяет наличие SSH allow-правила; при auto_block — обязательно."""
+    if not ufw_installed():
+        return
+    if not ufw_active():
+        if params.get("auto_block"):
+            console.print(Panel(
+                "[warn]UFW не активен[/warn], но включена [accent]auto_block[/accent].\n\n"
+                "Это означает, что при превышении лимита агент попытается включить\n"
+                "[accent]default deny outgoing[/accent], но без активного UFW это не сработает.\n\n"
+                "Включите UFW заранее (с обязательным allow для SSH-порта):\n"
+                "  [accent]ufw allow OpenSSH[/accent]\n"
+                "  [accent]ufw enable[/accent]",
+                title="⚠️  UFW неактивен", border_style="yellow",
+            ))
+        return
+
+    if ufw_has_ssh_rule():
+        ok("В UFW найдено правило для SSH — auto_block безопасен")
+        return
+
+    # UFW активен, но SSH-правила нет — это критично!
+    console.print(Panel(
+        "[err]ВНИМАНИЕ: в UFW не найдено allow-правило для SSH-порта![/err]\n\n"
+        "Если включена [accent]auto_block[/accent] и сработает блокировка трафика —\n"
+        "вы можете [err]потерять SSH-доступ к серверу[/err].\n\n"
+        "Текущий статус UFW:",
+        title="🚨 КРИТИЧНО", border_style="red",
+    ))
+    console.print(Panel(ufw_status_text(), border_style="red"))
+
+    if params.get("auto_block"):
+        warn("Auto_block включён, но SSH-правила нет. Это опасно.")
+        if Confirm.ask("Добавить allow-правило для SSH сейчас (откроет порт 22)?",
+                       default=True):
+            try:
+                run(["ufw", "allow", "OpenSSH"], capture=True)
+                ok("Правило OpenSSH добавлено")
+            except Exception:
+                # Fallback: явный порт 22
+                run(["ufw", "allow", "22/tcp"], capture=True)
+                ok("Правило для порта 22/tcp добавлено")
+        else:
+            if Confirm.ask("Отключить auto_block? (тогда блокировки не будет, "
+                           "но и риска потерять SSH тоже нет)", default=True):
+                # Перезаписываем конфиг с auto_block=false
+                params["auto_block"] = False
+                cfg_path = CONFIG_DIR / "agent.yaml"
+                content = cfg_path.read_text()
+                content = re.sub(r"^auto_block:.*$", "auto_block: false",
+                                 content, flags=re.MULTILINE)
+                cfg_path.write_text(content)
+                ok("auto_block отключён в конфиге")
+            else:
+                warn("Оставляю как есть — будьте внимательны!")
 
 
 def verify_agent(params: dict) -> None:
@@ -616,12 +867,112 @@ def install_bot_flow() -> None:
     run(["systemctl", "daemon-reload"])
     ok("Файлы установлены")
 
+    # Настройка файрвола
+    configure_firewall_for_bot(params)
+
     step("Запускаю traffic-bot")
     run(["systemctl", "enable", "--now", "traffic-bot"], capture=True)
     time.sleep(4)
 
     console.print()
     verify_bot(params)
+
+
+def configure_firewall_for_bot(params: dict) -> None:
+    """Открывает порт бота в UFW в зависимости от выбора пользователя."""
+    port = params["listen_port"]
+    listen_host = params["listen_host"]
+
+    console.print()
+    console.rule("[title] Настройка файрвола [/title]", style="cyan")
+
+    # Случай 1: бот слушает только локально → файрвол не нужен
+    if listen_host in ("127.0.0.1", "localhost", "::1"):
+        ok(f"Бот слушает на [accent]{listen_host}[/accent] — внешний доступ не нужен, UFW не трогаю")
+        return
+
+    # Случай 2: UFW не установлен/не активен
+    if not ufw_installed():
+        warn("UFW не установлен в системе — пропускаю настройку файрвола")
+        return
+
+    if not ufw_active():
+        console.print(Panel(
+            f"[warn]UFW установлен, но не активен.[/warn]\n\n"
+            f"Это значит, что порт [accent]{port}[/accent] сейчас доступен всем "
+            f"(если только нет другого файрвола, например на стороне хостинга).\n\n"
+            f"Чтобы включить UFW позже, выполните:\n"
+            f"  [accent]ufw allow OpenSSH[/accent]       (или 'ufw allow <ваш SSH-порт>/tcp')\n"
+            f"  [accent]ufw allow {port}/tcp[/accent]\n"
+            f"  [accent]ufw enable[/accent]\n\n"
+            f"[err]ВАЖНО:[/err] перед [accent]ufw enable[/accent] обязательно "
+            f"разрешите SSH-порт — иначе потеряете доступ.",
+            title="⚠️  UFW неактивен", border_style="yellow",
+        ))
+        return
+
+    # Случай 3: UFW активен — спрашиваем стратегию
+    console.print("🔥 [prompt]UFW активен.[/prompt] Как открыть порт?")
+    t = Table(box=box.SIMPLE, show_header=False)
+    t.add_column("", style="accent")
+    t.add_column("Описание")
+    t.add_row("1", "Открыть всем (быстро, но небезопасно)")
+    t.add_row("2", "Открыть только указанным IP агентов (рекомендуется)")
+    t.add_row("3", "Не открывать сейчас (например, бот за reverse-proxy)")
+    console.print(t)
+    choice = Prompt.ask("Выбор", choices=["1", "2", "3"], default="2")
+
+    if choice == "3":
+        warn(f"Файрвол не настроен. Откройте порт {port} вручную позже:")
+        console.print(f"  [accent]ufw allow from <AGENT_IP> to any port {port} proto tcp[/accent]")
+        return
+
+    if choice == "1":
+        console.print(Panel(
+            f"[warn]Открываю порт {port} для всех.[/warn]\n\n"
+            f"Бот защищён [accent]shared_secret[/accent], но кто угодно сможет "
+            f"стучаться, что засорит логи и может стать вектором атаки.",
+            title="⚠️  Внимание", border_style="yellow",
+        ))
+        if not Confirm.ask("Точно открыть всем?", default=False):
+            return configure_firewall_for_bot(params)  # повторим выбор
+        success, log_text = ufw_open_port(port, sources=None,
+                                          comment=f"traffic-bot port")
+        if success:
+            ok(f"Порт {port} открыт всем")
+        else:
+            err(f"Ошибка UFW: {log_text}")
+        return
+
+    # choice == "2" — список IP агентов
+    console.print(f"\n💡 Введите IP-адреса агентов, которым разрешить подключение к порту [accent]{port}[/accent].")
+    console.print("[muted]   Можно вводить отдельные IP (1.2.3.4) или подсети (10.0.0.0/24).[/muted]")
+    sources: list[str] = []
+    while True:
+        ip = Prompt.ask(
+            f"   IP агента #{len(sources) + 1} [muted](Enter — закончить)[/muted]",
+            default="", show_default=False,
+        )
+        ip = ip.strip()
+        if not ip:
+            if sources:
+                break
+            warn("Список пуст — нужен хотя бы один IP, иначе агенты не смогут подключиться")
+            if Confirm.ask("Пропустить настройку UFW?", default=False):
+                return
+            continue
+        if not validate_ip_or_cidr(ip):
+            warn(f"Неверный формат: {ip}. Пример: 1.2.3.4 или 10.0.0.0/24")
+            continue
+        sources.append(ip)
+        ok(f"Добавлен: [accent]{ip}[/accent]")
+
+    success, log_text = ufw_open_port(port, sources=sources, comment="traffic-bot agent")
+    console.print(log_text)
+    if success:
+        ok(f"Порт {port} открыт для {len(sources)} IP-адреса(ов)")
+    else:
+        err(f"Не удалось открыть порт: {log_text}")
 
 
 def verify_bot(params: dict) -> None:
