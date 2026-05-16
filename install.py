@@ -29,53 +29,20 @@ def ensure_rich():
         return
     except ImportError:
         pass
-
-    import sys as _sys
-    import threading as _threading
-    import time as _time
-
-    print("📦 Устанавливаю библиотеку rich для красивого интерфейса...", flush=True)
-
-    def spinner(stop_event, label):
-        """Простой текстовый спиннер, который пишет в stderr (он не буферизуется построчно).
-        Работает даже при curl|bash, потому что stderr подключен к терминалу."""
-        chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        i = 0
-        start = _time.time()
-        while not stop_event.is_set():
-            elapsed = int(_time.time() - start)
-            _sys.stderr.write(f"\r   {chars[i % len(chars)]} {label} [{elapsed}s] ")
-            _sys.stderr.flush()
-            i += 1
-            _time.sleep(0.1)
-        _sys.stderr.write("\r" + " " * 70 + "\r")
-        _sys.stderr.flush()
-
+    print("📦 Устанавливаю библиотеку rich для красивого интерфейса...")
     cmds = [
-        ("apt install python3-rich",
-         ["apt", "install", "-y", "-qq", "python3-rich"]),
-        ("pip install rich (--break-system-packages)",
-         ["pip3", "install", "--break-system-packages", "rich"]),
-        ("pip install rich",
-         ["pip3", "install", "rich"]),
+        ["apt", "install", "-y", "-qq", "python3-rich"],
+        ["pip3", "install", "--break-system-packages", "rich"],
+        ["pip3", "install", "rich"],
     ]
-    for name, cmd in cmds:
-        stop = _threading.Event()
-        t = _threading.Thread(target=spinner, args=(stop, name), daemon=True)
-        t.start()
+    for cmd in cmds:
         try:
             subprocess.run(cmd, check=True, capture_output=True)
-            stop.set()
-            t.join()
-            print(f"✓ rich установлен через: {name}", flush=True)
+            print("✓ rich установлен")
             return
         except (subprocess.CalledProcessError, FileNotFoundError):
-            stop.set()
-            t.join()
-            print(f"   ⚠ {name} — не сработало, пробую дальше", flush=True)
             continue
-    print("✗ Не удалось установить rich. Поставьте вручную: pip3 install rich",
-          flush=True)
+    print("✗ Не удалось установить rich. Поставьте вручную: pip3 install rich")
     sys.exit(1)
     sys.exit(1)
 
