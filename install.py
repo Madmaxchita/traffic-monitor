@@ -29,29 +29,54 @@ def ensure_rich():
         return
     except ImportError:
         pass
-    # Сразу включаем небуферизованный вывод, чтобы пользователь видел прогресс
+
+    import sys as _sys
+    import threading as _threading
+    import time as _time
+
     print("📦 Устанавливаю библиотеку rich для красивого интерфейса...", flush=True)
-    print("   Это может занять 30-120 секунд (особенно при первой установке).", flush=True)
+
+    def spinner(stop_event, label):
+        """Простой текстовый спиннер, который пишет в stderr (он не буферизуется построчно).
+        Работает даже при curl|bash, потому что stderr подключен к терминалу."""
+        chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        i = 0
+        start = _time.time()
+        while not stop_event.is_set():
+            elapsed = int(_time.time() - start)
+            _sys.stderr.write(f"\r   {chars[i % len(chars)]} {label} [{elapsed}s] ")
+            _sys.stderr.flush()
+            i += 1
+            _time.sleep(0.1)
+        _sys.stderr.write("\r" + " " * 70 + "\r")
+        _sys.stderr.flush()
 
     cmds = [
-        ("apt install python3-rich", ["apt", "install", "-y", "python3-rich"]),
+        ("apt install python3-rich",
+         ["apt", "install", "-y", "-qq", "python3-rich"]),
         ("pip install rich (--break-system-packages)",
          ["pip3", "install", "--break-system-packages", "rich"]),
-        ("pip install rich", ["pip3", "install", "rich"]),
+        ("pip install rich",
+         ["pip3", "install", "rich"]),
     ]
     for name, cmd in cmds:
-        print(f"   ⏳ Пробую: {name}...", flush=True)
+        stop = _threading.Event()
+        t = _threading.Thread(target=spinner, args=(stop, name), daemon=True)
+        t.start()
         try:
-            # НЕ capture_output — показываем процесс в реальном времени
-            import subprocess as _sp
-            _sp.run(cmd, check=True,
-                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-            print("✓ rich установлен", flush=True)
+            subprocess.run(cmd, check=True, capture_output=True)
+            stop.set()
+            t.join()
+            print(f"✓ rich установлен через: {name}", flush=True)
             return
         except (subprocess.CalledProcessError, FileNotFoundError):
-            print(f"   ⚠ Не сработало, пробую следующий способ", flush=True)
+            stop.set()
+            t.join()
+            print(f"   ⚠ {name} — не сработало, пробую дальше", flush=True)
             continue
-    print("✗ Не удалось установить rich. Поставьте вручную: pip3 install rich", flush=True)
+    print("✗ Не удалось установить rich. Поставьте вручную: pip3 install rich",
+          flush=True)
+    sys.exit(1)
     sys.exit(1)
 
 
