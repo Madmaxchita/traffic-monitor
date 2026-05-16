@@ -75,10 +75,14 @@ class Config:
 def load_state() -> dict:
     if STATE_PATH.exists():
         try:
-            return json.loads(STATE_PATH.read_text())
+            d = json.loads(STATE_PATH.read_text())
+            d.setdefault("pending_commands", {})
+            d.setdefault("servers", {})
+            d.setdefault("last_silence_alert", {})
+            return d
         except Exception:
             log.exception("Ошибка чтения состояния")
-    return {"servers": {}, "last_silence_alert": {}}
+    return {"servers": {}, "last_silence_alert": {}, "pending_commands": {}}
 
 
 def save_state(state: dict) -> None:
@@ -178,8 +182,28 @@ def make_app(cfg: Config, state: dict, tg: TelegramClient) -> web.Application:
         await tg.broadcast(msg)
         return web.json_response({"ok": True})
 
+    async def handle_commands(request: web.Request):
+        """
+        Агент дёргает этот эндпоинт периодически, чтобы забрать команды,
+        которые поставил в очередь пользователь через Telegram (/unblock и т.п.).
+        Возвращает список команд и СРАЗУ ЖЕ очищает очередь — повторная
+        выдача исключена. Если запрос не дошёл — команда теряется,
+        и пользователю придётся повторить (это компромисс простоты).
+        """
+        if not await check_auth(request):
+            return web.Response(status=401, text="unauthorized")
+        sid = request.query.get("server_id", "")
+        if not sid:
+            return web.json_response({"commands": []})
+        cmds = state["pending_commands"].pop(sid, [])
+        if cmds:
+            log.info("Выдаю команды для %s: %s", sid, cmds)
+            save_state(state)
+        return web.json_response({"commands": cmds})
+
     app.router.add_post("/report", handle_report)
     app.router.add_post("/notify", handle_notify)
+    app.router.add_get("/commands", handle_commands)
     return app
 
 
@@ -217,11 +241,86 @@ async def handle_command(cfg: Config, state: dict, tg: TelegramClient,
         sids = ", ".join(sorted(state["servers"].keys()))
         await tg.send_message(chat_id, f"Известные серверы: {sids}")
 
+    elif cmd == "/unblock":
+        # /unblock <server_id> <N_GB> — выдать агенту запас в N GB сверх текущего
+        usage_hint = (
+            "Использование: <code>/unblock &lt;server_id&gt; &lt;N&gt;</code>\n"
+            "где <b>N</b> — количество GB, которые добавить к текущему "
+            "использованию (новый лимит = used + N GB до конца расчётного периода)."
+        )
+        if len(parts) < 3:
+            blocked = [sid for sid, s in state["servers"].items() if s.get("blocked")]
+            if blocked:
+                lst = ", ".join(sorted(blocked))
+                await tg.send_message(chat_id,
+                    f"{usage_hint}\n\nСейчас заблокированы: <b>{lst}</b>"
+                )
+            else:
+                await tg.send_message(chat_id,
+                    f"{usage_hint}\n\nЗаблокированных серверов нет."
+                )
+            return
+
+        sid = parts[1]
+        if sid not in state["servers"]:
+            await tg.send_message(chat_id,
+                f"Сервер <b>{sid}</b> не найден. /servers — список известных."
+            )
+            return
+
+        try:
+            grace_gb = int(parts[2])
+        except ValueError:
+            await tg.send_message(chat_id,
+                f"Не могу понять <b>{parts[2]}</b> как число GB.\n{usage_hint}"
+            )
+            return
+
+        if grace_gb < 1:
+            await tg.send_message(chat_id,
+                f"Минимум 1 GB. {usage_hint}"
+            )
+            return
+
+        # Грубая проверка: текущее used + grace должно быть больше текущего лимита.
+        # used у бота из последнего /report — может слегка устареть, но для
+        # sanity-check сойдёт. Точную проверку делает агент в момент исполнения.
+        srv = state["servers"][sid]
+        used = int(srv.get("used_bytes", 0))
+        limit = int(srv.get("limit_bytes", 0))
+        grace_bytes = grace_gb * 1_000_000_000
+        new_limit_estimate = used + grace_bytes
+        if new_limit_estimate <= limit:
+            need_gb = (limit - used) // 1_000_000_000 + 1
+            await tg.send_message(chat_id, (
+                f"⚠️ {grace_gb} GB запаса не выведет из блокировки.\n"
+                f"Использовано: <b>{fmt_bytes(used)}</b>, "
+                f"текущий лимит: <b>{fmt_bytes(limit)}</b>.\n"
+                f"Минимум полезный запас: <b>{need_gb} GB</b>."
+            ))
+            return
+
+        # ставим команду в очередь — затираем предыдущие unblock_grace,
+        # чтобы пользователь мог уточнить число повторной командой
+        queue = state["pending_commands"].setdefault(sid, [])
+        queue[:] = [c for c in queue if not c.startswith("unblock_grace:")]
+        queue.append(f"unblock_grace:{grace_bytes}")
+        save_state(state)
+
+        await tg.send_message(chat_id, (
+            f"✅ Команда поставлена в очередь для <b>{sid}</b>.\n"
+            f"Запас: <b>{grace_gb} GB</b> сверх текущего использования.\n"
+            f"Сработает в течение нескольких минут (по таймеру агента).\n"
+            f"Новый лимит действует до конца расчётного периода."
+        ))
+
     elif cmd == "/help" or cmd == "/start":
         await tg.send_message(chat_id, (
             "<b>Команды:</b>\n"
             "/status — сводка по всем серверам\n"
             "/servers — список серверов\n"
+            "/unblock &lt;server_id&gt; &lt;N&gt; — снять блокировку, "
+            "выдать N GB запаса до конца периода\n"
             "/help — это сообщение"
         ))
 
